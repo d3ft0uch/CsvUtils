@@ -162,7 +162,6 @@ object Convert {
   class CSVHandler(val successor: Option[Handler]) extends Handler {
 
     override def process(file: File): Unit = try {
-      val source = file.getAbsolutePath
       if (Common.trimExtension(file.getName) == "") throw new IllegalArgumentException
       val target = new File(getPath(file.getAbsolutePath), Common.trimExtension(file.getName) + ".csv").toPath
       mkDir(target.getParent.toFile)
