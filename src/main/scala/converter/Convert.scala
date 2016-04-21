@@ -1,9 +1,10 @@
 package converter
 
 import java.io.{File, PrintWriter}
+import java.nio.file.{Files, StandardCopyOption}
 
-import extensions.{XlsxToCsv, PerSheetOutputDispatcher, XlsToCsv}
-import org.apache.poi.openxml4j.opc.{PackageAccess, OPCPackage}
+import extensions.{PerSheetOutputDispatcher, XlsToCsv, XlsxToCsv}
+import org.apache.poi.openxml4j.opc.{OPCPackage, PackageAccess}
 import org.apache.poi.ss.usermodel.Cell
 import utils.Common
 
@@ -161,35 +162,25 @@ object Convert {
   class CSVHandler(val successor: Option[Handler]) extends Handler {
 
     override def process(file: File): Unit = try {
-      val input = Source.fromFile(file).getLines().toList
-      if (validate(input)) {
-        save(new File(getPath(file.getAbsolutePath), Common.trimExtension(file.getName) + ".csv"), input mkString "\n")
-      }
-      else successor match {
-        case Some(succ) => succ.process(file)
-        case None => // do nothing if no successors remains
-      }
+      val source = file.getAbsolutePath
+      if (Common.trimExtension(file.getName) == "") throw new IllegalArgumentException
+      val target = new File(getPath(file.getAbsolutePath), Common.trimExtension(file.getName) + ".csv").toPath
+      mkDir(target.getParent.toFile)
+      Files.copy(
+        file.toPath,
+        Files.createFile(target), StandardCopyOption.REPLACE_EXISTING)
+
     }
     catch {
-      case NonFatal(ex) => successor match {
-        case Some(succ) => succ.process(file)
-        case None => // do nothing if no successors remains
-      }
+      case NonFatal(ex) =>
+        println(s"Unhandled file ${file.getAbsolutePath}")
+        successor match {
+          case Some(succ) => succ.process(file)
+          case None => // do nothing if no successors remains
+        }
     }
 
-    private def validate(lines: List[String]) = try {
-      if (lines.nonEmpty) {
-        val dimensions = lines.map(_.split(delimitter).length).toSet
-        val singleColumned = lines.map {
-          case line => line.head == '"' && line.last == '"'
-        }.fold(true)(_ && _)
-        dimensions.size == 1 && (!dimensions.contains(1) || singleColumned)
-      }
-      else false
-    }
-    catch {
-      case NonFatal(ex) => false
-    }
+    private def validate(lines: List[String]) = lines.nonEmpty
   }
 
   private def mkDir(file: File) = {
