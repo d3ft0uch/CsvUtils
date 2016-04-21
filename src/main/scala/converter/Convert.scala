@@ -1,13 +1,12 @@
 package converter
 
-import java.io.{File, FileInputStream, PrintWriter}
+import java.io.{File, PrintWriter}
 
-import org.apache.poi.hssf.usermodel.HSSFWorkbook
+import extensions.{XlsxToCsv, PerSheetOutputDispatcher, XlsToCsv}
+import org.apache.poi.openxml4j.opc.{PackageAccess, OPCPackage}
 import org.apache.poi.ss.usermodel.Cell
-import org.apache.poi.xssf.usermodel.XSSFWorkbook
 import utils.Common
 
-import scala.collection.JavaConversions._
 import scala.io.Source
 import scala.util.control.NonFatal
 import scala.xml.XML
@@ -21,8 +20,9 @@ object Convert {
     if (args.length < 1) return usage
     val dir = args.mkString(" ")
     _source = dir
-    val target = (dir.split(File.separator).dropRight(1) ++ Array("CSV")) mkString File.separator + File.separator
+    val target = new File(new File(dir).getParent, "CSV").getAbsolutePath
     _target = target
+    println(s"From: ${_source} -> ${_target}")
     println("Running..")
     mkDir(new File(target))
     val files = Common.getFiles(new File(dir))
@@ -47,6 +47,8 @@ object Convert {
     .replaceAll("&lt;/tr", "</tr")
     .replaceAll("&lt;td", "<td")
     .replaceAll("&lt;/td", "</td")
+    .replaceAll("&lt;th", "<th")
+    .replaceAll("&lt;/th", "</th")
     .replaceAll("&lt;table", "<table")
     .replaceAll("&lt;/table", "</table")
 
@@ -65,12 +67,12 @@ object Convert {
   class HtmlHandler(val successor: Option[Handler]) extends Handler {
     override def process(file: File): Unit = {
       try {
-        val input = Source.fromFile(file).getLines().map(escapeTags).mkString
-        val table = XML.loadString(input) \ "tr" map (_ \ "td")
+        val input = XML.loadString(Source.fromFile(file).getLines().map(escapeTags).mkString)
+        val table = (input \\ "th") :: (input \\ "tr" map (_ \\ "td")).toList
         val data = table.map {
           case row => row.map(node => escapeText(node.text)).mkString(delimitter)
         } mkString "\n"
-        save(new File(getPath(file.getAbsolutePath) + Common.trimExtension(file.getName) + ".csv"), data)
+        save(new File(getPath(file.getAbsolutePath), Common.trimExtension(file.getName) + ".csv"), data)
       }
       catch {
         case NonFatal(ex) => successor match {
@@ -84,15 +86,10 @@ object Convert {
   class XLSHandler(val successor: Option[Handler]) extends Handler {
     override def process(file: File): Unit = {
       try {
-        val workbook = new HSSFWorkbook(new FileInputStream(file))
-        for (idx <- 0 to workbook.getNumberOfSheets - 1) {
-          val sheet = workbook.getSheetAt(idx)
-          val sheetName = sheet.getSheetName
-          val data = sheet.iterator.map {
-            case row => row.map(getCellValue) mkString delimitter
-          } mkString "\n"
-          save(new File(getPath(file.getAbsolutePath) + sheetName + ".csv"), normalize(data))
-        }
+        val sourceFilename = file.getAbsolutePath
+        val targetPath = getPath(file.getAbsolutePath)
+        val dispatcher = new PerSheetOutputDispatcher(targetPath)
+        new XlsToCsv(sourceFilename, dispatcher, -1).process()
       }
       catch {
         case NonFatal(ex) =>
@@ -107,16 +104,12 @@ object Convert {
 
   class XLSXHandler(val successor: Option[Handler]) extends Handler {
     override def process(file: File): Unit = {
+      var opc: OPCPackage = null
       try {
-        val workbook = new XSSFWorkbook(new FileInputStream(file))
-        for (idx <- 0 to workbook.getNumberOfSheets - 1) {
-          val sheet = workbook.getSheetAt(idx)
-          val sheetName = sheet.getSheetName
-          val data = sheet.iterator.map {
-            case row => row.map(getCellValue) mkString delimitter
-          } mkString "\n"
-          save(new File(getPath(file.getAbsolutePath) + sheetName + ".csv"), normalize(data))
-        }
+        opc = OPCPackage.open(file, PackageAccess.READ)
+        val targetPath = getPath(file.getAbsolutePath)
+        val dispatcher = new PerSheetOutputDispatcher(targetPath)
+        new XlsxToCsv(opc, dispatcher, -1).process()
       }
       catch {
         case NonFatal(ex) =>
@@ -125,6 +118,9 @@ object Convert {
               succ.process(file)
             case None => // do nothing if no successors remains
           }
+      }
+      finally {
+        if (opc != null) opc.close()
       }
     }
   }
@@ -135,7 +131,7 @@ object Convert {
       val flag = validate(input)
       if (flag) {
         val data = input.map(_.replaceAll("\t", delimitter)) mkString "\n"
-        save(new File(getPath(file.getAbsolutePath) + Common.trimExtension(file.getName) + ".csv"), data)
+        save(new File(getPath(file.getAbsolutePath), Common.trimExtension(file.getName) + ".csv"), data)
       }
       else successor match {
         case Some(succ) => succ.process(file)
@@ -167,7 +163,7 @@ object Convert {
     override def process(file: File): Unit = try {
       val input = Source.fromFile(file).getLines().toList
       if (validate(input)) {
-        save(new File(getPath(file.getAbsolutePath) + file.getName), input mkString "\n")
+        save(new File(getPath(file.getAbsolutePath), Common.trimExtension(file.getName) + ".csv"), input mkString "\n")
       }
       else successor match {
         case Some(succ) => succ.process(file)
@@ -184,7 +180,10 @@ object Convert {
     private def validate(lines: List[String]) = try {
       if (lines.nonEmpty) {
         val dimensions = lines.map(_.split(delimitter).length).toSet
-        dimensions.size == 1 && !dimensions.contains(1)
+        val singleColumned = lines.map {
+          case line => line.head == '"' && line.last == '"'
+        }.fold(true)(_ && _)
+        dimensions.size == 1 && (!dimensions.contains(1) || singleColumned)
       }
       else false
     }
@@ -203,7 +202,7 @@ object Convert {
   }
 
   private def getPath(src: String) = {
-    val path = Common.trimExtension(src.replace(_source, _target)) + File.separator
+    val path = Common.trimExtension(src.replace(_source, _target))
     path
   }
 
